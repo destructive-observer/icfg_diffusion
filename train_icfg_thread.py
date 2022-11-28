@@ -212,7 +212,7 @@ def d_loss_wgan(d_out_real,d_out_fake, alpha):
    # wgan_loss = torch.exp((-1)*torch.mean(d_out_real) + torch.mean(d_out_fake)/torch.mean(d_out_real))
    # gp = wgan_gp(self,fake,real,LAMBDA,netD)
    return loss1,loss2
-def wgan_gp(self,fake,real,LAMBDA,netD,d_param,centered,t_emb,x_tp1):
+def wgan_gp(self,fake,real,LAMBDA,netD,centered,t_emb,x_tp1):
    real_data = real
    real_data = real_data.cuda()
    fake_data = fake
@@ -230,7 +230,7 @@ def wgan_gp(self,fake,real,LAMBDA,netD,d_param,centered,t_emb,x_tp1):
             # interpolates = interpolates.to(device)#.cuda()
    interpolates = interpolates.cuda()
    interpolates = torch.autograd.Variable(interpolates, requires_grad=True)
-   disc_interpolates = netD(interpolates,d_param,t_emb,x_tp1.detach())
+   disc_interpolates = netD(interpolates,t_emb,x_tp1.detach())
    gradients = torch.autograd.grad(outputs=disc_interpolates, inputs=interpolates,
                         grad_outputs=torch.ones(disc_interpolates.size()).cuda(),#.cuda(), #if use_cuda else torch.ones(
                                     #disc_interpolates.size()),
@@ -240,7 +240,7 @@ def wgan_gp(self,fake,real,LAMBDA,netD,d_param,centered,t_emb,x_tp1):
    gradient_penalty = ((gradients.norm(2, dim=1) - centered) ** 2).mean() * LAMBDA
         
    return gradient_penalty
-def new_gp(self,fake,real,LAMBDA,netD,d_param,centered,t_emb,x_tp1,scale=0.1):
+def new_gp(self,fake,real,LAMBDA,netD,centered,t_emb,x_tp1,scale=0.1):
    real_data = real
    real_data = real_data.cuda()
    fake_data = fake
@@ -258,7 +258,7 @@ def new_gp(self,fake,real,LAMBDA,netD,d_param,centered,t_emb,x_tp1,scale=0.1):
             # interpolates = interpolates.to(device)#.cuda()
    interpolates = interpolates.cuda()
    interpolates = torch.autograd.Variable(interpolates, requires_grad=True)
-   disc_interpolates = netD(interpolates,d_param,t_emb,x_tp1.detach())
+   disc_interpolates = netD(interpolates,t_emb,x_tp1.detach())
    gradients = torch.autograd.grad(outputs=disc_interpolates, inputs=interpolates,
                         grad_outputs=torch.ones(disc_interpolates.size()).cuda(),#.cuda(), #if use_cuda else torch.ones(
                                     #disc_interpolates.size()),
@@ -337,7 +337,7 @@ def cfggan(opt, d_config, g_config, z_gen, loader,fromfile=None,saved=None,
       # else:
       #    ddg.cfg_eta = cfg_eta
       # timeLog('cfg_eta %d -----------------' % (ddg.cfg_eta))
-      iterator,diff,d_loss_v,d_loss_gp,d_fake,d_real = ddg.icfg(loader, iterator, d_loss, opt.cfg_U)
+      real_datas,diff,d_loss_v,d_loss_gp,d_fake,d_real = ddg.icfg(loader, iterator, d_loss, opt.cfg_U)
       ddg.epoch = stage
       # print('ddg.epoch {}'.format(ddg.epoch))
       # if stage >= 2000:
@@ -356,7 +356,7 @@ def cfggan(opt, d_config, g_config, z_gen, loader,fromfile=None,saved=None,
       if is_time_to_generate(opt, stage):
          generate(opt, ddg, stage)        
          
-      ddg.approximate(g_loss, opt.cfg_N,loader,iterator)         
+      ddg.approximate(g_loss, opt.cfg_N,real_datas)         
       # ddg.tensorboard(stage, 'train',g_loss_v,d_loss_v,d_loss_gp,d_fake,d_real)
 #-----------------------------------------------------------------
 def write_real(opt, loader):
@@ -455,7 +455,7 @@ class DDG:
       self.pos_coeff = Posterior_Coefficients(opt, opt.device)
       self.time_step=opt.num_timesteps
       self.nz = opt.nz
-   
+      self.cfg_N = opt.cfg_N
       self.d_params_list=[]   
       self.rank = opt.local_rank
       self.world_size = opt.world_size
@@ -474,7 +474,7 @@ class DDG:
                                    t_emb_dim = opt.t_emb_dim,
                                    act=nn.LeakyReLU(0.2)).to(self.device)
       self.d_net = nn.SyncBatchNorm.convert_sync_batchnorm(self.d_net)
-      self.d_net = nn.parallel.DistributedDataParallel(self.d_net, device_ids=[self.gpu],broadcast_buffers=False,find_unused_parameters = False)
+      self.d_net = nn.parallel.DistributedDataParallel(self.d_net, device_ids=[self.gpu],broadcast_buffers=False,find_unused_parameters = True)
       # self.d_net= self.d_net.cuda()
       # self.d_net.train()
       # self.d_params = self.d_net.named_parameters()
@@ -533,15 +533,18 @@ class DDG:
    def load(self,  d):
       assert len(self.d_params_list) == len(d['d_params_list'])
       for i in range(len(self.d_params_list)):
-         self.d_params_list[i] = copy.deepcopy(d['d_params_list'][i])    
+#          self.d_params_list[i] = copy.deepcopy(d['d_params_list'][i])
+         self.d_params_list[i].load_state_dict(d['d_params_list'][i].state_dict())
          # copy_params(src=d['d_params_list'][i], dst=self.d_params_list[i])
-      self.d_net = copy.deepcopy(d['d_params'])
-      self.g_net = copy.deepcopy(d['g_params']) 
-      self.d_optimizer = copy.deepcopy(d['d_optimizer'])
+#       self.d_net = copy.deepcopy(d['d_params'])
+      self.d_net.load_state_dict(d['d_params'].state_dict())
+#       self.g_net = copy.deepcopy(d['g_params'])
+      self.g_net.load_state_dict(d['g_params'].state_dict())
+      self.d_optimizer.load_state_dict(d['d_optimizer'].state_dict())
       # copy_params(src=d['d_params'], dst=self.d_params)
       # copy_params(src=d['g_params'], dst=self.g_params)      
       self.cfg_eta = d['cfg_eta']
-
+   
    #----------------------------------------------------------
    def num_D(self):
       return len(self.d_params_list)
@@ -631,7 +634,8 @@ class DDG:
             # vizG_n.images(fake.grad.data,opts=dict(title='-1 - 1 fake  grad images vizG_n+stage{}+numD {}'.format(self.epoch,t0), caption='vizG_n D.'))   
             # fake_g = (fake.grad.data+1)/2
             # vizG_n.images(fake_g,opts=dict(title='0 - 1 fake grad images vizG_n+stage{}+numD {}'.format(self.epoch,t0), caption='vizG_n D.'))    
-            # print('fake data shape {}'.format(fake.data.shape))
+#             print('fake data {}'.format(torch.mean(fake.data)))
+#             print('fake data {}'.format(torch.mean(fake.grad.data)))
             if self.verbose:
                timeLog('DDG::generate ... with fake.data=%f and fake.grad=%f' % (torch.sum(fake.data),torch.sum(fake.grad.data)))
             # fake.data += self.cfg_eta * (fake.grad.data*torch.mean(self.real_sample)-torch.mean(d_out))/torch.mean(self.real_sample)/torch.mean(self.real_sample)
@@ -656,6 +660,7 @@ class DDG:
             # print(fakes)
          # print(fakes)
          # print(fake)
+         # fake = sample_posterior(self.pos_coeff, fake, x_tp1, t_emb)
          fakes[num_gened:num_gened+num] = fake.to(torch.device('cpu'))
          t_emb_s [num_gened:num_gened+num] = t_emb
          x_tp1_s[num_gened:num_gened+num] = x_tp1.to(torch.device('cpu'))
@@ -684,18 +689,26 @@ class DDG:
       self.check_trainability()
       t_inc = 1 if self.verbose else 5
       is_train = True
+      real_datas=None
+      cfg_N=self.cfg_N
+      num_gened=0  
       for t in range(self.num_D()):
          # print('self.num_D {}'.format(self.num_D()))
          sum_real = sum_fake = count = 0
-         
+         print('t{}'.format(t))
          for upd in range(cfg_U):
             sample,iter = get_next(loader, iter)
 
             num = sample[0].size(0)
-            
+            if real_datas is None:
+               sz = [cfg_N*num] + list(sample[0].size())[1:]
+               real_datas = torch.Tensor(torch.Size(sz), device=torch.device('cpu')) 
             # print('num is {}'.format(sample[0]))
+            real_datas[num_gened:num_gened+num] = sample[0].to(torch.device('cpu'))
+            num_gened += num
+            
             sample[0]= sample[0].to(self.device, non_blocking=True)
-            self.real_sample = sample[0]
+#             self.real_sample = sample[0]
             # self.store_real_list(t,sample[0])
             fake,t_emb,x_t,x_tp1 = self.generate(num, t=t,real_data=sample[0],list_or_not=False)
             ####### the t_emb must Corresponding  to fake #####
@@ -704,11 +717,16 @@ class DDG:
             t_emb = t_emb.to(self.device, non_blocking=True)
             x_t = x_t.to(self.device, non_blocking=True)
             x_tp1 = x_tp1.to(self.device, non_blocking=True)
+#             print(fake)
+#             print(x_t)
+#             print(x_tp1)
             d_out_real = self.d_net(x_t,t_emb, x_tp1.detach()).view(-1)
             d_out_fake = self.d_net(fake,t_emb, x_tp1.detach()).view(-1)
+#             print(d_out_real)
+#             print(d_out_fake)
             loss1,loss2 = d_loss(d_out_real, d_out_fake,self.alpha)
             loss = loss1 + loss2
-            loss.backward()
+#             loss.backward()
             loss_gp=0
             # print(self.lamda)
             if self.lamda != 0:
@@ -717,19 +735,23 @@ class DDG:
                # print(self.lamda)
                if self.gptype ==0:
                   # print('0 ----{}'.format(self.gptype))
-                  loss_gp = wgan_gp(self,fake,sample[0],self.lamda,self.d_net,self.d_params,0,t_emb,x_tp1.detach())
-                  loss_gp.backward()
+                  loss_gp = wgan_gp(self,fake,sample[0],self.lamda,self.d_net,0,t_emb,x_tp1.detach())
+#                   loss_gp.backward()
                elif self.gptype ==1:
                   # print('1 ----{}'.format(self.gptype))
-                  loss_gp = wgan_gp(self,fake,sample[0],self.lamda,self.d_net,self.d_params,1,t_emb,x_tp1.detach())
-                  loss_gp.backward()
+                  loss_gp = wgan_gp(self,fake,sample[0],self.lamda,self.d_net,1,t_emb,x_tp1.detach())
+#                   loss_gp.backward()
                elif self.gptype ==2:
                   # print('2 ----{}'.format(self.gptype))
-                  loss_gp = new_gp(self,fake,sample[0],self.lamda,self.d_net,self.d_params,0,t_emb,x_tp1.detach(),scale=self.scale)
-                  loss_gp.backward()
+                  loss_gp = new_gp(self,fake,sample[0],self.lamda,self.d_net,0,t_emb,x_tp1.detach(),scale=self.scale)
+#                   loss_gp.backward()
                else:
                   raise ValueError('Unknown gptype: %s ...' % self.gptype)
-
+#             print(loss)
+#             print(loss_gp)
+            loss = loss + loss_gp
+            print(loss)
+            loss.backward()
             self.d_optimizer.step()
             self.d_optimizer.zero_grad()         
             
@@ -745,7 +767,7 @@ class DDG:
       raise_if_nan(sum_real)
       raise_if_nan(sum_fake)
 
-      return iter,(sum_real-sum_fake)/count,loss,loss_gp,sum_fake/count,sum_real/count
+      return real_datas,(sum_real-sum_fake)/count,loss,loss_gp,sum_fake/count,sum_real/count
 
    #-----------------------------------------------------------------
    def initialize_G(self, g_loss, cfg_N,loader,iterator): 
@@ -774,12 +796,19 @@ class DDG:
    
       batch_size = self.optim_config.x_batch_size   
       z_dim = self.z_gen(1).size(1)
-      params = { 'proj.w': normal_(torch.Tensor(z_dim, img_dim), std=0.01) }
+      print(img_dim)
+      params = { 'proj.w': variance_scaling_init_(torch.Tensor(z_dim, 12288), scale=1.) }
+      params1 = { 'proj.w': variance_scaling_init_(torch.Tensor(12288, 49152), scale=1.) }
+      params2 = { 'proj.w': variance_scaling_init_(torch.Tensor(49152, img_dim), scale=1.) }
+#       params = { 'proj.w': normal_(torch.Tensor(z_dim, 12288), std=0.01) }
+#       params1 = { 'proj.w': normal_(torch.Tensor(12288, 49152), std=0.01) }
+#       params2 = { 'proj.w': normal_(torch.Tensor(49152, img_dim), std=0.01) }
       # params1 = { 'proj.w': normal_(torch.Tensor(img_dim, img_dim), std=0.01) }
       # params1['proj.w'].requires_grad = True
-      # params = { 'proj.w':  variance_scaling_init_(torch.Tensor(z_dim, img_dim),scale=1.)}
+#       params = { 'proj.w':  variance_scaling_init_(torch.Tensor(z_dim, img_dim),scale=1.)}
       params['proj.w'].requires_grad = True
-      # params1['proj.w'].requires_grad = True
+      params1['proj.w'].requires_grad = True
+      params2['proj.w'].requires_grad = True
 
       num_gened = 0
       fakes = torch.Tensor(cfg_N, img_dim)
@@ -798,7 +827,7 @@ class DDG:
             # print(params['proj.w'].device)
             # params['proj.w'] = params['proj.w'].to(self.device, non_blocking=True)
             # params1['proj.w'] = params1['proj.w'].to(self.device, non_blocking=True)
-            fake = torch.mm(z, params['proj.w'])
+            fake = torch.mm(torch.mm(torch.mm(z, params['proj.w']),params1['proj.w']),params2['proj.w'])
             # fake =  torch.mm(fake1, params1['proj.w'])
             t_emb = torch.randint(0, self.time_step, (num,),device=self.device)
             # print(t_emb.dtype)
@@ -820,20 +849,12 @@ class DDG:
       self._approximate(loader, g_loss)
          
    #-----------------------------------------------------------------
-   def approximate(self, g_loss, cfg_N,loader,iterator): 
+   def approximate(self, g_loss, cfg_N,sample_list): 
       if self.rank == 0:
         timeLog('DDG::approximate ... cfg_N=%d' % cfg_N)
       batch_size = self.optim_config.x_batch_size
-      num_gened = 0
-      sample_list = None
-      while num_gened < cfg_N:
-         num = min(batch_size, cfg_N - num_gened)
-         sample,iterator = get_next(loader, iterator)
-         if sample_list is None:
-            sz = [cfg_N] + list(sample[0].size())[1:]
-            sample_list = torch.Tensor(torch.Size(sz), device=torch.device('cpu')) 
-         sample_list[num_gened:num_gened+num]=sample[0].to(torch.device('cpu'))
-         num_gened += num   
+#       num_gened = 0
+#       sample_list = None
       target_fakes,zs,t_emb_s,x_t,x_tp_1= self.generate(cfg_N, do_return_z=True, batch_size=batch_size,real_data=sample_list,list_or_not=True)
       # print(target_fakes)
       dataset = TensorDataset(zs, target_fakes,t_emb_s,x_t,x_tp_1)

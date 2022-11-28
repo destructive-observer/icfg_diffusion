@@ -114,6 +114,7 @@ def sample_posterior(coefficients, x_0,x_t, t):
 
 def sample_from_model(coefficients, generator, n_time, x_init, T, opt):
     x = x_init
+    x_return = []
     with torch.no_grad():
         for i in reversed(range(n_time)):
             t = torch.full((x.size(0),), i, dtype=torch.int64).to(x.device)
@@ -123,8 +124,9 @@ def sample_from_model(coefficients, generator, n_time, x_init, T, opt):
             x_0 = generator(x, t_time, latent_z)
             x_new = sample_posterior(coefficients, x_0, x, t)
             x = x_new.detach()
+            x_return.append(x)
         
-    return x
+    return x,x_return
 
 #%%
 def sample_and_test(args):
@@ -144,7 +146,7 @@ def sample_and_test(args):
 
     
     netG = NCSNpp(args).to(device)
-    ckpt = torch.load('./saved_info/dd_gan/{}/{}/netG_{}.pth'.format(args.dataset, args.exp, args.epoch_id), map_location=device)
+    ckpt = torch.load('./netG_550.pth', map_location=device)
     
     #loading weights from ddp in single gpu
     for key in list(ckpt.keys()):
@@ -183,8 +185,10 @@ def sample_and_test(args):
         print('FID = {}'.format(fid))
     else:
         x_t_1 = torch.randn(args.batch_size, args.num_channels,args.image_size, args.image_size).to(device)
-        fake_sample = sample_from_model(pos_coeff, netG, args.num_timesteps, x_t_1,T,  args)
+        fake_sample,fake_list  = sample_from_model(pos_coeff, netG, args.num_timesteps, x_t_1,T,  args)
         fake_sample = to_range_0_1(fake_sample)
+        for i in range(4):
+            torchvision.utils.save_image(to_range_0_1(fake_list[i]), './samples_{}_{}.jpg'.format(args.dataset,i))                
         torchvision.utils.save_image(fake_sample, './samples_{}.jpg'.format(args.dataset))
 
     
