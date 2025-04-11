@@ -32,6 +32,7 @@ from score_sde.models.discriminator import Discriminator_large_icfg
 from train_icfg import cfggan
 from torch.nn.init import normal_
 from icfg.data import ImageFolder
+from icfg.data import ImageFolder_ImageNet
 
 def copy_source(file, output_dir):
     shutil.copyfile(file, os.path.join(output_dir, os.path.basename(file)))
@@ -116,7 +117,8 @@ def q_sample(coeff, x_start, t, *, noise=None):
     """
     if noise is None:
         noise = torch.randn_like(x_start)
-
+#     print(a.s_cum)
+#     print(a.s_cum.shape)
     x_t = extract(coeff.a_s_cum, t, x_start.shape) * x_start + \
         extract(coeff.sigmas_cum, t, x_start.shape) * noise
 
@@ -215,7 +217,7 @@ def sample_from_model(coefficients, generator, params, n_time, x_init, T, opt):
 
 def train(rank, gpu, args):
     from score_sde.models.discriminator import Discriminator_small, Discriminator_large
-    from score_sde.models.discriminator import Discriminator_small_icfg,Discriminator_small_icfg,Discriminator_mid_icfg
+    from score_sde.models.discriminator import Discriminator_small_icfg,Discriminator_small_icfg,Discriminator_mid_icfg,Discriminator_mid_icfg2
     from score_sde.models.ncsnpp_generator_adagn import NCSNpp
     from score_sde.models.ncsnpp_generator_adagn import NCSNpp_ICFG
     from EMA import EMA
@@ -248,7 +250,8 @@ def train(rank, gpu, args):
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-        dataset = ImageFolder(args.data_root,transform=train_transform)
+#         dataset = ImageFolder(args.data_root,transform=train_transform)
+        dataset = ImageFolder_ImageNet(args.data_root,transform=train_transform)
         # train_data = LSUN(root=args.data_root, classes=[
         #                   'church_outdoor_train'], transform=train_transform)
         # subset = list(range(0, 120000))
@@ -288,8 +291,9 @@ def train(rank, gpu, args):
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-        dataset = LMDBDataset(root=args.data_root, name='celeba',
-                              train=True, transform=train_transform)
+        dataset = ImageFolder(args.data_root,transform=train_transform)
+#         dataset = LMDBDataset(root=args.data_root, name='celeba',
+#                               train=True, transform=train_transform)
     elif args.dataset == 'lsun_bedroom64':
     
         train_transform = transforms.Compose([
@@ -304,7 +308,18 @@ def train(rank, gpu, args):
                           'bedroom_train'], transform=train_transform)
         subset = list(range(0, 1300000))
         dataset = torch.utils.data.Subset(train_data, subset)
+    elif args.dataset == 'lsun_tower64':
+    
+        train_transform = transforms.Compose([
+            transforms.Resize(args.image_size),
+            transforms.CenterCrop(args.image_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
 
+        dataset = LSUN(root=args.data_root, classes=[
+                          'tower_train'], transform=train_transform)
     train_sampler = torch.utils.data.distributed.DistributedSampler(dataset,
                                                                     num_replicas=args.world_size,
                                                                     rank=rank)
@@ -405,19 +420,39 @@ def train(rank, gpu, args):
     #               .format(checkpoint['epoch']))
     # else:
     #     global_step, epoch, init_epoch = 0, 0, 0
-
+    from_file = None
+    saved_begin = None
+    if args.saved:
+        from_file = torch.load(args.saved, map_location=None if torch.cuda.is_available() else 'cpu')
+        saved = args.saved
+        saved_begin = args.savedbegin
+        new_interval = args.save_interval
+        stages = args.num_stages
+#       logging('WARNING: from file is begin')
+        args = from_file['opt']
+        args.save_interval = new_interval
+        args.num_stages = stages
+        
     def z_gen(num):
         return normal_(torch.Tensor(num, 100), std=1.0)
 
-    if args.dataset == 'cifar10' or args.dataset == 'stackmnist' or args.dataset.endswith('64'):
+    if args.dataset == 'cifar10' or args.dataset == 'stackmnist':
+        print('xxx')
         cfggan(args, Discriminator_small_icfg,
-           NCSNpp_ICFG, z_gen, data_loader, device)
-    # elif args.dataset.endswith('64'):
-    #     cfggan(args,Discriminator_mid_icfg ,
-    #        NCSNpp_ICFG, z_gen, data_loader, device)
+           NCSNpp_ICFG, z_gen, data_loader, device,from_file,saved_begin)
+        
+    elif args.dataset.endswith('64'):
+        print('ggg')
+        cfggan(args,Discriminator_mid_icfg2,
+           NCSNpp_ICFG, z_gen, data_loader, device,from_file,saved_begin)
+#         cfggan(args,Discriminator_large_icfg,
+#            NCSNpp_ICFG, z_gen, data_loader, device)
+        
     else:
+        print('ccc')
         cfggan(args, Discriminator_large_icfg,
-           NCSNpp_ICFG, z_gen, data_loader, device)
+           NCSNpp_ICFG, z_gen, data_loader, device,from_file,saved_begin)
+       
 
     # for epoch in range(init_epoch, args.num_epoch+1):
     #     train_sampler.set_epoch(epoch)
@@ -610,6 +645,12 @@ def add_icfg_args_(parser):
                         default=10000, help='Number of stages.')
     parser.add_argument('--cfg_eta', type=float, default=1,
                         help='Generator step-size eta.')
+    parser.add_argument('--divergence', type=str, default='KL',
+                        help='divergence type KL, logd, JS, Jeffrey.')
+    parser.add_argument('--gftype', type=str, default='kl',
+                        help='gradient flow type. kl or ws-kl, ws-js, ws-logd. kl is cfg')
+    parser.add_argument('--noise_factor', type=float, default=1.e-2,
+                        help='noise_factor for ws gradient flow. other type gradient flow is 0')
     parser.add_argument('--lr', type=float, default=0.00025,
                         help='Learning rate used for training discriminator and approximator.')
     parser.add_argument('--cfg_x_epo', type=int, default=10,
@@ -635,8 +676,12 @@ def add_icfg_args_(parser):
                         help='scale for the eposion, value is [0,1]')
     parser.add_argument('--gptype', type=int, default='0',
                         help='0-0 centered 1-1 centered 2-newtype.')
+    parser.add_argument('--app_type', type=int, default='0',
+                        help='0-icfg real img 1-new iter real img 2-no real img.')
     parser.add_argument('--alpha', type=float, default='1',
                         help='use w distance to regulation regression')
+    parser.add_argument('--saved', type=str, default='', help='Pathname for the saved model.')
+    parser.add_argument('--savedbegin', type=int, default=0, help='begin stage for the saved model.')
     parser.add_argument('--verbose', action='store_true',
                         help='If true, display more info.')
     return parser
@@ -771,13 +816,14 @@ if __name__ == '__main__':
     args.approx_redmax = 5
     args.approx_decay = 0.1
     args.weight_decay = 0.0
-    args.cfg_N = args.batch_size * args.cfg_x_epo
+    args.cfg_N = args.batch_size * args.cfg_T
+#     args.cfg_N = args.batch_size
     RMSprop_str = 'RMSprop'
     Adam_str = 'Adam'
-    args.optim_type = RMSprop_str
+    args.optim_type = Adam_str
     args.optim_eps = 1e-18
-    args.optim_a1 = 0.95
-    args.optim_a2 = -1
+    args.optim_a1 = 0.5
+    args.optim_a2 = 0.9
     # ----------
     args.world_size = args.num_proc_node * args.num_process_per_node
     size = args.num_process_per_node
@@ -794,6 +840,7 @@ if __name__ == '__main__':
         gen_dir_dict['cfg_N'] = args.cfg_N
         gen_dir_dict['num_timesteps'] = args.num_timesteps
         gen_dir_dict['num_stages'] = args.num_stages
+        gen_dir_dict['app_type'] = 'app_type'+str(args.app_type)
         if args.lamda != 0:
             gen_dir_dict['gptype'] = args.gptype
             gen_dir_dict['lamda'] = args.lamda
